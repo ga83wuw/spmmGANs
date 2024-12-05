@@ -8,6 +8,7 @@ from torch.distributions.categorical import Categorical
 from rdkit import Chem
 import random
 import numpy as np
+import pandas as pd
 import pickle
 import warnings
 from tqdm import tqdm
@@ -62,11 +63,21 @@ def generate_with_property(model, properties, n_sample, prop_mask, k=2, stochast
     with open('./normalize.pkl', 'rb') as w:
         norm = pickle.load(w)
     property_mean, property_std = norm
+
+    # Ensure properties match expected size
+    if len(properties) != len(property_mean):
+        raise ValueError("Mismatch between properties and normalization parameters. Check property_name.txt and CSV alignment.")
+
+    # Normalize properties
     properties = (properties - property_mean) / property_std
     prop = properties.unsqueeze(0).repeat(1, 1)
     prop = prop.to(device, non_blocking=True)
 
     property1 = model.property_embed(prop.unsqueeze(2))  # batch*12*feature
+
+    # Apply masking to properties
+    if prop_mask.size(0) != property1.size(1):
+        raise ValueError("Mismatch between prop_mask size and properties size. Check property_name.txt and CSV alignment.")
 
     property_unk = model.property_mask.expand(property1.size(0), property1.size(1), -1)
     mpm_mask_expand = prop_mask.unsqueeze(0).unsqueeze(2).repeat(property_unk.size(0), 1, property_unk.size(2)).to(device)
@@ -188,12 +199,25 @@ def main(args, config):
         for idx, line in enumerate(f):
             property_to_index[line.strip()] = idx
 
-    '''condition for stochastic molecule generation with a file s2p_input.csv'''
-    prop_mask, prop_input = torch.ones(53), torch.zeros(53)
+    # Adjust tensor sizes dynamically based on the number of properties
+    num_properties = 53 #len(property_to_index)
+    prop_mask, prop_input = torch.ones(num_properties), torch.zeros(num_properties)
+
+    # Read p2s_input.csv and update prop_mask and prop_input
     for idx, row in pd.read_csv('./p2s_input.csv').iterrows():
-        prop_input[property_to_index[row['property']]] = float(row['input_value'])
-        prop_mask[property_to_index[row['property']]] = 0
-    
+        property_name = row['property']
+        if property_name in property_to_index:
+            prop_input[property_to_index[property_name]] = float(row['input_value'])
+            prop_mask[property_to_index[property_name]] = 0
+        else:
+            print(f"Warning: Property '{property_name}' in p2s_input.csv is not in property_name.txt. Skipping.")
+
+    # Ensure unused properties remain masked
+    unused_properties = set(property_to_index.keys()) - set(pd.read_csv('./p2s_input.csv')['property'])
+    for unused_property in unused_properties:
+        prop_mask[property_to_index[unused_property]] = 1  # Mask unused properties
+        prop_input[property_to_index[unused_property]] = 0  # Default input value for unused properties
+
     '''condition for stochastic molecule generation of Fig.2-(a)'''
     # prop_mask = torch.zeros(53)  # 0 indicates no masking for that property
     # prop_input = calculate_property('COc1cccc(NC(=O)CN(C)C(=O)COC(=O)c2cc(c3cccs3)nc3ccccc23)c1')
@@ -227,7 +251,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', default='./Pretrain/checkpoint_SPMM.ckpt')
     parser.add_argument('--vocab_filename', default='./vocab_bpe_300.txt')
-    parser.add_argument('--device', default='cuda')
+    parser.add_argument('--device', default='mps')
     parser.add_argument('--n_generate', default=1000, type=int)
     parser.add_argument('--k', default=2, type=int)
     parser.add_argument('--stochastic', default=True, type=bool)
